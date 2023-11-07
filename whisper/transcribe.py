@@ -28,7 +28,7 @@ def transcribe(
     no_speech_threshold: Optional[float] = 0.6,
     condition_on_previous_text: bool = True,
     **decode_options,
-): 
+):
     """
     Transcribe an audio file using Whisper
 
@@ -71,6 +71,7 @@ def transcribe(
     A dictionary containing the resulting text ("text") and segment-level details ("segments"), and
     the spoken language ("language"), which is detected when `decode_options["language"]` is None.
     """
+
     if type(audio) == list:
         return batch_transcribe(model=model,
                                 audio=audio,
@@ -131,17 +132,17 @@ def transcribe(
                 for dr in decode_result:
                     if compression_ratio_threshold is not None and dr.compression_ratio > compression_ratio_threshold:
                         needs_fallback = True  # too repetitive
-                        print("Falling back due to compression ratio.")
+                        # print("Falling back due to compression ratio.")
                     if logprob_threshold is not None and dr.avg_logprob < logprob_threshold:
                         needs_fallback = True  # average log probability is too low
-                        print("Falling back due to low log probability.")
+                        # print("Falling back due to low log probability.")
             else:
                 if compression_ratio_threshold is not None and decode_result.compression_ratio > compression_ratio_threshold:
                     needs_fallback = True  # too repetitive
-                    print("Falling back due to compression ratio.")
+                    # print("Falling back due to compression ratio.")
                 if logprob_threshold is not None and decode_result.avg_logprob < logprob_threshold:
                     needs_fallback = True  # average log probability is too low
-                    print("Falling back due to low log probability.")
+                    # print("Falling back due to low log probability.")
 
             if not needs_fallback:
                 break
@@ -155,8 +156,8 @@ def transcribe(
     time_precision = (
         input_stride * HOP_LENGTH / SAMPLE_RATE
     )  # time per output token: 0.02 (seconds)
-    all_tokens = [] 
-    all_segments = [] 
+    all_tokens = []
+    all_segments = []
     prompt_reset_since = 0
 
     initial_prompt = decode_options.pop("initial_prompt", None) or []
@@ -332,7 +333,10 @@ def batch_transcribe(
     if dtype == torch.float32:
         decode_options["fp16"] = False
 
-    mels = [log_mel_spectrogram(audio_file) for audio_file in audio]
+    if audio[0].ndim == 1:
+        mels = [log_mel_spectrogram(audio_file) for audio_file in audio]
+    else:
+        mels = audio
     segments = [pad_or_trim(mel, N_FRAMES).to(model.device).to(dtype) for mel in mels]
 
     if decode_options.get("language", None) is None:
@@ -350,9 +354,9 @@ def batch_transcribe(
         if type(lang) == str:
             languages = [lang]*len(audio)
         elif type(lang) == list:
-            assert all(isinstance(l, str) for l in lang), "If a list of languages is specified in DecodeOptions, all languages must be strings." 
+            assert all(isinstance(l, str) for l in lang), "If a list of languages is specified in DecodeOptions, all languages must be strings."
             assert len(lang) == len(audio), "If a list of languages is specified in DecodeOptions, the list length must match the number of audio files specified."
-            languages = lang 
+            languages = lang
         else:
             raise NotImplementedError("Only string and list arguments are supported for the language DecodeOption.")
 
@@ -365,6 +369,8 @@ def batch_transcribe(
     def decode_with_fallback(segment: torch.Tensor) -> DecodingResult:
         temperatures = [temperature] if isinstance(temperature, (int, float)) else temperature
         decode_result = None
+        decoding_results = [None] * len(segment)
+        decoding_result_found = [False] * len(segment)
         for t in temperatures:
             kwargs = {**decode_options}
             if t > 0:
@@ -374,17 +380,25 @@ def batch_transcribe(
             else:
                 # disable best_of when t == 0
                 kwargs.pop("best_of", None)
-            
+
             options = DecodingOptions(**kwargs, temperature=t)
             decode_result = model.decode(segment, options)
 
             needs_fallback = False
             if type(decode_result) == list:
-                for dr in decode_result:
+                for i, dr in enumerate(decode_result):
+                    if decoding_result_found[i]:
+                        continue
+                    decoding_result_found[i] = True
+                    decoding_results[i] = dr
+
                     if compression_ratio_threshold is not None and dr.compression_ratio > compression_ratio_threshold:
                         needs_fallback = True  # too repetitive
+                        decoding_result_found[i] = False
+
                     if logprob_threshold is not None and dr.avg_logprob < logprob_threshold:
                         needs_fallback = True  # average log probability is too low
+                        decoding_result_found[i] = False
             else:
                 if compression_ratio_threshold is not None and decode_result.compression_ratio > compression_ratio_threshold:
                     needs_fallback = True  # too repetitive
@@ -393,6 +407,9 @@ def batch_transcribe(
 
             if not needs_fallback:
                 break
+
+        if type(decode_result) == list:
+            decode_result = decoding_results
 
         return decode_result
 
@@ -403,8 +420,8 @@ def batch_transcribe(
     time_precision = (
         input_stride * HOP_LENGTH / SAMPLE_RATE
     )  # time per output token: 0.02 (seconds)
-    all_tokens = [[] for _ in range(batch_size)] 
-    all_segments = [[] for _ in range(batch_size)] 
+    all_tokens = [[] for _ in range(batch_size)]
+    all_segments = [[] for _ in range(batch_size)]
     prompt_reset_since = [0]*batch_size
 
     initial_prompt = decode_options.pop("initial_prompt", None) or []
@@ -468,7 +485,7 @@ def batch_transcribe(
 
             decode_options["prompt"] = [all_tokens[imap[i]][prompt_reset_since[imap[i]]:] for i in range(len(batch_segments))]
             decode_options["language"] = [l for i,l in enumerate(languages) if continue_processing[i]]
-            results: List[DecodingResult] = decode_with_fallback(torch.stack(batch_segments)) 
+            results: List[DecodingResult] = decode_with_fallback(torch.stack(batch_segments))
             batch_tokens = [torch.tensor(result.tokens) for result in results]
 
             no_speech_results = [False]*len(results)
